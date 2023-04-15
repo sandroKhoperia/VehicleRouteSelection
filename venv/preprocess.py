@@ -8,29 +8,31 @@ import graphviz
 from collections import deque
 from itertools import permutations
 from embedding import generate_node_embeddings, generate_path_embeddings
-
-
-
-
+from torch_geometric.utils import from_networkx
+from torch_geometric.data import HeteroData
+import torch
 
 def get_paths(graph, source, dest, length=3, path=[]):
     path = path + [source]
     if len(path) == length + 1:
-        return [path]
+        if path[-1] == dest:
+            return [path]
+        else:
+            return []
     paths = []
     for neighbor in graph.neighbors(source):
-        if neighbor not in path and neighbor != dest and graph.nodes[neighbor]['type']=='car':
+        if neighbor not in path and graph.nodes[neighbor]['type'] == 'car':
             new_paths = get_paths(graph, neighbor, dest, length, path)
             paths.extend(new_paths)
-        elif neighbor == dest and len(path) == length and graph.nodes[neighbor]['type']=='car':
-            paths.append(path + [dest])
     return paths
-
 
 
 def create_graph(trucks, cars, distance_matrix, mapping):
     # Create empty graph
-    G = nx.Graph()
+    G = nx.DiGraph()
+    data = HeteroData()
+    data['car'].x = torch.tensor(cars[['type','dest_node_id','dest_profit', 'car_weight']].values)
+    data['truck'].x = torch.tensor(trucks[['type']].values, dtype=torch.float)
 
     # Add car nodes with attributes
     for _, row in cars.iterrows():
@@ -43,28 +45,47 @@ def create_graph(trucks, cars, distance_matrix, mapping):
         G.add_node(int(row['id']), type='truck', node_id=mapping[int(row['node_id'])], visit_cost=row['visit_cost'])
         G.add_edge(int(row['id']), int(row['node_id']), weight=row['visit_cost'])
 
+    id_to_idx = {car_id: idx for idx, car_id in enumerate(cars['id'])}
 
+    edges = []
     for i in range(len(distance_matrix)):
         for j in range(len(distance_matrix)):
             if distance_matrix[i][j] != 0:
                 if G.nodes[j]['type'] == 'car':
                     G.add_edge(i, j, weight=distance_matrix[i][j])
+                edges.append((id_to_idx[i], id_to_idx[j]))
+    data['truck'].edge_index =torch.tensor([trucks['id'].tolist(), trucks['node_id'].tolist()], dtype=torch.int)
+    data['car'].edge_index = torch.tensor(edges, dtype=torch.int).t()
 
-    print(G.nodes[0])
+    #print(data['car'].edge_index_dict)
+    print(len(G.nodes()))
+    print(len(G.edges()))
+    return G, data
 
-    return G
 
-
-
+def ensure_unique_nodes(map, nodes):
+    return frozenset(nodes) in map
 
 def get_all_paths(G, src, dst, mapping):
     paths = get_paths(G, src, dst)
     total_paths = []
-    for path in tqdm(paths, desc='Computing path permutations'):
+    unique_node_map = set()
+    first_path_dests = [mapping[G.nodes[paths[0][1]]['dest_node']], mapping[G.nodes[paths[0][2]]['dest_node']],
+                mapping[G.nodes[paths[0][3]]['dest_node']]]
+    best_path = paths[0] + first_path_dests
+    best_path_profit = -10000
+    best_path_cars = [paths[0][1:]]
+    best_path_dest = first_path_dests
+    for path in paths:
         with_no_src = path[1:]
         dest = [mapping[G.nodes[with_no_src[0]]['dest_node']], mapping[G.nodes[with_no_src[1]]['dest_node']],
                 mapping[G.nodes[with_no_src[2]]['dest_node']]]
-        all_permutations = permutations(with_no_src + dest)
+
+        if ensure_unique_nodes(unique_node_map, with_no_src):
+           continue
+
+        unique_node_map.add(frozenset(with_no_src))
+        all_permutations = list(permutations(with_no_src + dest))
         weight_map = {
             with_no_src[0]: dest[0],
             with_no_src[1]: dest[1],
@@ -73,10 +94,12 @@ def get_all_paths(G, src, dst, mapping):
             dest[1]: with_no_src[1],
             dest[2]: with_no_src[2]
         }
+        best_permutation = [path[0]] + list(all_permutations[0])
+        best_profit = -5000
         for perm in all_permutations:
             if (perm.index(dest[0]) > perm.index(with_no_src[0])) and \
                     (perm.index(dest[1]) > perm.index(with_no_src[1])) and (
-                    perm.index(dest[2]) > perm.index(with_no_src[2])):
+                    perm.index(dest[2]) > perm.index(with_no_src[2]) and list(perm)[4] == dst):
                 total_cost = G.nodes[path[0]]['visit_cost']
                 total_profit = G.nodes[with_no_src[0]]['dest_profit'] + G.nodes[with_no_src[1]]['dest_profit']
                 total_profit += G.nodes[with_no_src[2]]['dest_profit']
@@ -85,8 +108,6 @@ def get_all_paths(G, src, dst, mapping):
                 total_weight += G.nodes[dest[1]]['weight'] + G.nodes[dest[1]]['weight']
                 violation = False  # if total_weight < 13000 else True
                 curr_weight = 0;
-                # cars - 0,1,2 (5000,6000,7000)  dst - 4,5,6
-                # perm - 0,1,4,2,5,6
 
                 for i in range(1, len(perm)):
                     if perm[i - 1] in with_no_src:
@@ -100,34 +121,64 @@ def get_all_paths(G, src, dst, mapping):
                 score = total_profit - total_cost if not violation else -1000
 
                 total_paths.append([[path[0]] + list(perm), score])
+                if best_profit < score:
+                    best_profit = score
+                    best_permutation = [path[0]] + list(perm)
+        if best_path_profit < best_profit:
+            best_path = best_permutation
+            best_path_profit = best_profit
+            best_path_dest = dest
+            best_path_cars =with_no_src
+    return total_paths, [best_path, best_path_profit], [best_path_cars, best_path_dest]
 
-    return total_paths
+
+def get_every_path(G, mapping):
+    trucks = []
+    cars = []
+    for node in G.nodes:
+        if G.nodes[node]['type'] == 'truck':
+            trucks.append(node)
+        else:
+            cars.append(node)
+
+    all_paths = []
+    best_paths = []
+
+    for truck in trucks:
+        for car in tqdm(cars, desc=f'Processing paths between truck:{truck} and all cars'):
+            paths, [best_path, best_profit], [best_path_src, best_path_dst] = get_all_paths(G, truck, car, mapping)
+            all_paths.append(paths)
+            best_paths.append([best_path, best_profit])
 
 
-def preprocess(n, gas_price):
-    trucks, cars, dist_matrix, mapping = compute_truck_and_cars(30,5, gas_price)
-    G = create_graph(trucks, cars, dist_matrix, mapping)
-    embeddings = generate_node_embeddings(G)
+    return all_paths, best_paths
+
+
+
+def preprocess(n_cars, n_trucks, gas_price):
+    trucks, cars, dist_matrix, mapping = compute_truck_and_cars(n_cars,n_trucks, gas_price)
+    G, data = create_graph(trucks, cars, dist_matrix, mapping)
+    #embeddings = generate_node_embeddings(G)
 
     #best_path,best_profit = find_best_path(G,34,5)
     #print(best_path, best_profit)
-    paths = get_all_paths(G, 34, 5, mapping)
-    all_path_embeddings = []
+    #paths, [best_path, best_profit], [best_path_src, best_path_dst] = get_all_paths(G, 34, 5, mapping)
+    #all_path_embeddings = []
 
-    for path in tqdm(paths, desc="Generating Path Embeddings"):
-        path_embeddings = generate_path_embeddings(path[0][1:], embeddings)
-        all_path_embeddings.append(path_embeddings)
+    #for path in tqdm(paths, desc="Generating Path Embeddings"):
+     #   path_embeddings = generate_path_embeddings(path[0][1:], embeddings)
+      #  all_path_embeddings.append(path_embeddings)
 
-    print(all_path_embeddings[0])
-
-
-
-
+    all_paths, best_paths = get_every_path(G, mapping)
+    print(all_paths[0][:5])
+    print(best_paths[:6])
+    print(data)
+    return all_paths, best_paths, data
 
 
 
 def main():
-    preprocess(30, 0.15)
+    preprocess(10,3, 0.15)
 
 if __name__ == '__main__':
     main()

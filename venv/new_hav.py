@@ -66,7 +66,7 @@ def compute_truck_and_cars(n_cars, n_trucks, gas_per_mile):
                 distance_cost = distance*gas_per_mile
 
                 if i >= n_cars:
-                    new_data = {'id': i, 'node_id': j, 'visit_cost': distance_cost }
+                    new_data = {'id': i,'type': 1, 'node_id': j, 'visit_cost': distance_cost }
                     trucks = pd.concat([trucks, pd.DataFrame([new_data])], ignore_index=True)
 
                 else:
@@ -74,7 +74,7 @@ def compute_truck_and_cars(n_cars, n_trucks, gas_per_mile):
 
                 if j < n_cars and j not in hash_set:
                     delivery_profit = distance*prices[j]
-                    new_data = {'id': j, 'dest_node_id': j-3 if j >= 3 else n_cars-1-j,
+                    new_data = {'id': j, 'type': 0,'dest_node_id': j-3 if j >= 3 else n_cars-1-j,
                                 'dest_profit': delivery_profit, 'car_weight': weights[j] }
                     cars = pd.concat([cars, pd.DataFrame([new_data])], ignore_index=True)
                     hash_set.add(j)
