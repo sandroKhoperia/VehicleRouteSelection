@@ -8,9 +8,18 @@ import graphviz
 from collections import deque
 from itertools import permutations
 from embedding import generate_node_embeddings, generate_path_embeddings
-from torch_geometric.utils import from_networkx
-from torch_geometric.data import HeteroData
+from torch_geometric.utils import from_networkx, to_networkx
+from torch_geometric.data import HeteroData, Data
 import torch
+import torch_geometric.transforms as T
+import matplotlib.pyplot as plt
+
+
+def visualize(g):
+    nx.draw(g, with_labels=True)
+    plt.show()
+
+
 
 def get_paths(graph, source, dest, length=3, path=[]):
     path = path + [source]
@@ -30,9 +39,17 @@ def get_paths(graph, source, dest, length=3, path=[]):
 def create_graph(trucks, cars, distance_matrix, mapping):
     # Create empty graph
     G = nx.DiGraph()
-    data = HeteroData()
-    data['car'].x = torch.tensor(cars[['type','dest_node_id','dest_profit', 'car_weight']].values)
-    data['truck'].x = torch.tensor(trucks[['type']].values, dtype=torch.float)
+    data = Data()
+    s = HeteroData()
+    dummies = pd.get_dummies(cars['dest_node_id'])
+
+    # concatenate dummy variables and other columns
+    data.x = torch.cat([
+        torch.tensor(dummies.values, dtype=torch.float),
+        torch.tensor(cars[['dest_profit', 'car_weight']].values, dtype=torch.float)
+    ], dim=1)
+
+    #data['truck'].x = torch.tensor(trucks[['type']].values, dtype=torch.float)
 
     # Add car nodes with attributes
     for _, row in cars.iterrows():
@@ -54,12 +71,17 @@ def create_graph(trucks, cars, distance_matrix, mapping):
                 if G.nodes[j]['type'] == 'car':
                     G.add_edge(i, j, weight=distance_matrix[i][j])
                 edges.append((id_to_idx[i], id_to_idx[j]))
-    data['truck'].edge_index =torch.tensor([trucks['id'].tolist(), trucks['node_id'].tolist()], dtype=torch.int)
-    data['car'].edge_index = torch.tensor(edges, dtype=torch.int).t()
-
+    #data['truck'].edge_index =torch.tensor([trucks['id'].tolist(), trucks['node_id'].tolist()], dtype=torch.int)
+    #data['car'].edge_index = torch.tensor(edges, dtype=torch.int).t()
+    data.edge_index = torch.tensor(edges, dtype=torch.int).t()
+    #data = T.ToUndirected()(data)
+    #data = T.AddSelfLoops()(data)
+    data = T.NormalizeFeatures()(data)
+    #data.node_types.append('truck')
     #print(data['car'].edge_index_dict)
-    print(len(G.nodes()))
-    print(len(G.edges()))
+    print("Data Representation",data)
+    print("Car Node Feature Data:",data.x)
+    print("Car Node Edge Index:",data.edge_index)
     return G, data
 
 
@@ -169,16 +191,18 @@ def preprocess(n_cars, n_trucks, gas_price):
      #   path_embeddings = generate_path_embeddings(path[0][1:], embeddings)
       #  all_path_embeddings.append(path_embeddings)
 
+    #visualize(G)
     all_paths, best_paths = get_every_path(G, mapping)
-    print(all_paths[0][:5])
-    print(best_paths[:6])
-    print(data)
+
+    print("All Paths with scores:",all_paths[0][:5])
+    print("Best Paths with scores:", best_paths[:6])
+    #print(data['car'])
     return all_paths, best_paths, data
 
 
 
 def main():
-    preprocess(10,3, 0.15)
+    preprocess(50,2, 0.15)
 
 if __name__ == '__main__':
     main()

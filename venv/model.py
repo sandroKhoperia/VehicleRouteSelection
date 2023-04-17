@@ -1,89 +1,55 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+import torch_geometric.nn
+from torch.utils.data import random_split
 from torch_geometric.data import Data
-from torch_geometric.nn import GCNConv, MessagePassing
+from torch_geometric.nn import GCNConv, MessagePassing, to_hetero, SAGEConv, GAE
 import preprocess
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from torch_geometric.data import Data, HeteroData
-from torch_geometric.nn import GCNConv
+from torch_geometric.data import Data, HeteroData,DataLoader, Dataset
+from torch_geometric.loader import HGTLoader
 import torch.optim as optim
 
 
-class PathPredictionModel(torch.nn.Module):
-    def __init__(self, num_hidden):
-        super(PathPredictionModel, self).__init__()
-        self.conv_truck = GCNConv(1, num_hidden)
-        self.conv_car = GCNConv(3, num_hidden)
-        self.lin = torch.nn.Linear(num_hidden, 1)
-
-    def forward(self, data, src, dst):
-        x_dict = {'truck': None, 'car': data['car'].x}
-        edge_index_dict = data.edge_index_dict
-        edge_weight_dict = data.edge_attr_dict
-
-        # message passing for truck nodes
-        x_dict['truck'] = torch.ones((data['truck'].num_nodes, 1)).to(data['truck'].x.device)
-        x_dict['truck'] = self.conv_truck(x_dict['truck'], edge_index_dict['truck'])
-
-        # message passing for car nodes
-        x_dict['car'] = self.conv_car(x_dict['car'], edge_index_dict['car'], edge_weight_dict['car'])
-
-        # concatenate truck and car node features
-        x = torch.cat([x_dict['truck'], x_dict['car']], dim=0)
-
-        # predict path
-        src_emb = x[src].squeeze()
-        dst_emb = x[dst].squeeze()
-        path_score = self.lin(src_emb * dst_emb)
-        return path_score
-
-    def predict_path(self, data, src, dst):
-        # perform graph search to find path with highest probability
-        x_dict = {'truck': None, 'car': data['car'].x}
-        edge_index_dict = data.edge_index_dict
-        edge_weight_dict = data.edge_attr_dict
-
-        # message passing for truck nodes
-        x_dict['truck'] = torch.ones((data['truck'].num_nodes, 1)).to(data['truck'].x.device)
-        x_dict['truck'] = self.conv_truck(x_dict['truck'], edge_index_dict['truck'])
-
-        # message passing for car nodes
-        x_dict['car'] = self.conv_car(x_dict['car'], edge_index_dict['car'], edge_weight_dict['car'])
-
-        # concatenate truck and car node features
-        x = torch.cat([x_dict['truck'], x_dict['car']], dim=0)
-
-        # perform graph search to find path with highest probability
-        path_prob, path = self._graph_search(x, edge_index_dict, src, dst)
-        return path
-
-    def _graph_search(self, x, edge_index_dict, src, dst):
-        visited = set()
-        frontier = [(src, [src], 1.0)]
-        while frontier:
-            node, path, path_prob = frontier.pop(0)
-            if node == dst:
-                return path_prob, path
-            visited.add(node)
-            neighbors = edge_index_dict['car'][1, edge_index_dict['car'][0] == node].tolist()
-            for neighbor in neighbors:
-                if neighbor not in visited:
-                    edge_index = torch.tensor([[node, neighbor], [neighbor, node]], dtype=torch.long).to(x.device)
-                    neighbor_emb = x[neighbor].squeeze()
-                    edge_weight = self.lin(x[node] * neighbor_emb).item()
-                    new_path_prob = path_prob * edge_weight
-                    new_path = path + [neighbor]
-                    frontier.append((neighbor, new_path, new_path_prob))
-        return 0.0, []  # no path found
+class Autoencoder(torch.nn.Module):
+    def __init__(self, input_channels, hidden_channels):
+        super(Autoencoder, self).__init__()
+        self.conv1 = GCNConv(input_channels, 2*hidden_channels)
+        self.conv2 = GCNConv(2*hidden_channels, hidden_channels)
+        self.fc = torch.nn.Linear(hidden_channels, 6)
 
 
+    def forward(self, x, edge_index):
+        x = F.relu(self.conv1(x, edge_index))
+        x = F.relu(self.conv2(x, edge_index))
+        x = self.fc(x)
+        return x
+
+
+
+# class GNNDataset(torch_geometric.data.Dataset):
+#     def __init__(self):
+
+
+class GraphWalkDataset(Dataset):
+    def __init__(self, walks, data):
+        self.walks = walks
+        self.data = data
+    def __len__(self):
+        return len(self.walks)
+
+    def __getitem__(self, idx):
+        src, dst, walk = self.walks[idx]
+
+        walk = torch.tensor(walk)
+
+        return src, dst, walk
 def main():
 
-    all_paths, best_paths, graph = preprocess.preprocess(10, 3, 0.15)
+    all_paths, best_paths, data = preprocess.preprocess(10, 3, 0.15)
     shortest_paths = []
 
     for best_path in best_paths:
@@ -92,40 +58,56 @@ def main():
         dst = path[6]
         shortest_paths.append([src, dst, path])
 
-    # define model and optimizer
-    model = PathPredictionModel(num_hidden=16)
-    optimizer = optim.Adam(model.parameters(), lr=0.01)
+    dataset = GraphWalkDataset(shortest_paths)
 
-    # define loss function
-    mse_loss = torch.nn.MSELoss()
+    train_size = int(0.8 * len(dataset))
+    test_size = len(dataset) - train_size
+    train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
-    # train model
-    for epoch in range(100):
+    batch_size = 2
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    # Define the model and optimizer
+    in_channels = {'car': data['car'].x.shape[1], 'truck': data['car'].x.shape[1]}
+    hidden_channels = 128
+    out_channels = 128
+    #model = Autoencoder(hidden_channels, out_channels)
+    #metadata = data.metadata()
+    #node_types = data.node_types
+    # Convert your model to be compatible with HeteroData
+    #model = to_hetero(model, data.metadata())
+    data.node_types = ['car', 'truck']
+    print(data.metadata())
+    print(data)
+    model = Autoencoder(hidden_channels)
+    model = GAE(model)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    num_epochs = 2
+    for epoch in range(num_epochs):
         model.train()
-        optimizer.zero_grad()
+        train_loss = 0.0
+        for i, data in enumerate(train_loader):
+            src, dst, walk = data
+            optimizer.zero_grad()
+            output = model(data.x_dict, data.edge_index, source=src, destination=dst)
+            loss = model.recon_loss(output, walk)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+        train_loss /= len(train_loader)
 
-        # forward pass
-        path_score = model(graph, src, dst)
-        actual_path_prob, actual_path = model._graph_search(x, edge_index_dict, src, dst)
-        actual_path = torch.tensor(actual_path, dtype=torch.long).to(path_score.device)
+        model.eval()
+        test_loss = 0.0
+        with torch.no_grad():
+            for i, data in enumerate(test_loader):
+                src, dst, walk = data
+                output = model(walk, source=src, destination=dst)
+                loss = criterion(output, walk)
+                test_loss += loss.item()
+            test_loss /= len(test_loader)
 
-        # compute loss
-        loss = mse_loss(path_score, actual_path_prob)
-
-        # backward pass and optimization
-        loss.backward()
-        optimizer.step()
-
-        # print progress
-        if epoch % 10 == 0:
-            print(f"Epoch {epoch}, loss: {loss.item()}")
-
-    # test model
-    model.eval()
-    path_score = model(data, src, dst)
-    actual_path_prob, actual_path = model._graph_search(x, edge_index_dict, src, dst)
-    print(f"Predicted path score: {path_score.item()}")
-    print(f"Actual path: {actual_path}")
+        print(f'Epoch [{epoch + 1}/{num_epochs}], Train Loss: {train_loss:.4f}, Test Loss: {test_loss:.4f}')
 
 if __name__ == '__main__':
     main()

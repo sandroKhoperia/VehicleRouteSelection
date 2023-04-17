@@ -32,7 +32,6 @@ def compute_truck_and_cars(n_cars, n_trucks, gas_per_mile):
     df_nodes = pd.read_csv('Dataset.csv', nrows=n_cars, usecols=['Price Per Mile','Weight'], thousands=',')
     df_nodes['Weight'] = df_nodes['Weight'].astype('int16')
     df_nodes['Price Per Mile'] = df_nodes['Price Per Mile'].astype('float16')
-    print(df_nodes.dtypes)
     # extract the latitude, longitude, and city name of the first n rows
     latitudes = df['lat']
     longitudes = df['lng']
@@ -40,7 +39,6 @@ def compute_truck_and_cars(n_cars, n_trucks, gas_per_mile):
     weights = df_nodes['Weight']
     prices = df_nodes['Price Per Mile']
     mapping = create_node_mapping(city_names)
-    print(len(latitudes), len(longitudes), len(city_names), len(weights), len(prices))
     cars = pd.DataFrame(data={
         'id': [],
         'dest_node_id': [],
@@ -141,8 +139,6 @@ def main():
     number_of_cities = 30
     compute_truck_and_cars(number_of_cities, 5, gas_per_mile)
 
-    #d_matrix, g_matrix = compute_matrices(number_of_cities, gas_per_mile)
-    #save_files(d_matrix, g_matrix)
 
 
 
